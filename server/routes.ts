@@ -8,9 +8,12 @@ import {
   insertConsigneeSchema,
   insertConsignmentNoteSchema,
   insertInvoiceLineItemSchema,
-  insertConsignmentDetailsSchema
+  insertConsignmentDetailsSchema,
+  insertFreightSchema
 } from "@shared/schema";
 import { z } from "zod";
+
+import { combinedAuth } from "../middlewares/combinedAuth";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Vehicle Master Routes
@@ -323,9 +326,48 @@ app.post("/api/vehicles", async (req, res) => {
     }
   });
 
+  app.get("/api/recent/lrs", async (req, res) => {
+    try {
+      const lrs = await storage.getAllConsignmentNotes();
+
+      if (!Array.isArray(lrs)) {
+        console.log("❌ lrs is not array:", lrs);
+        return res.json([]);
+      }
+
+      // Sort by consignmentId (DESC) to show recent first
+      const sorted = lrs.sort((a, b) => Number(b.consignmentId) - Number(a.consignmentId));
+
+      const formatted = await Promise.all(
+        sorted.map(async (lr) => {
+          const consignor = await storage.getConsignor(lr.consignorId);
+          const consignee = await storage.getConsignee(lr.consigneeId);
+          const vehicle = await storage.getVehicle(lr.vehicleId);
+
+          return {
+            id: lr.consignmentId,
+            cnoteNo: lr.cnoteNo,
+            date: lr.bookingDate,
+            consignor: consignor?.name,
+            consignee: consignee?.name,
+            vehicle: vehicle?.vehicleNo,
+            status: lr.transportMode || "in-transit",
+          };
+        })
+      );
+
+      console.log("API sending:", formatted);
+      res.json(formatted);
+    } catch (err) {
+      console.error("API error:", err);
+      res.json([]); // ALWAYS return an array to avoid frontend crashes
+    }
+  });
+
   app.get("/api/lrs/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      console.log("id:", id);
       const lr = await storage.getConsignmentNote(id);
       if (!lr) {
         return res.status(404).json({ message: "LR not found" });
@@ -337,25 +379,58 @@ app.post("/api/vehicles", async (req, res) => {
     }
   });
 
-  app.post("/api/lrs", async (req, res) => {
-    try {
-      const lrSchema = z.object({
-        note: insertConsignmentNoteSchema,
-        invoices: z.array(insertInvoiceLineItemSchema.omit({ consignmentId: true })),
-        details: insertConsignmentDetailsSchema.omit({ consignmentId: true })
-      });
-      
-      const validatedData = lrSchema.parse(req.body);
-      const lr = await storage.createConsignmentNote(validatedData);
-      res.status(201).json(lr);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ message: "Invalid LR data", errors: error.errors });
-      }
-      console.error("Error creating LR:", error);
-      res.status(500).json({ message: "Failed to create LR" });
+  app.get("/api/recent/lrs", async (req, res) => {
+  try {
+    console.log("🔄 /api/recent/lrs endpoint called");
+    console.log("🔐 User making request:", (req as any).user);
+    
+    const lrs = await storage.getAllConsignmentNotes();
+    console.log("📦 Raw LRs from storage:", lrs);
+
+    if (!Array.isArray(lrs)) {
+      console.log("❌ lrs is not array:", typeof lrs, lrs);
+      return res.json([]);
     }
-  });
+
+    console.log(`📊 Found ${lrs.length} LRs`);
+
+    // Sort by consignmentId (DESC) to show recent first
+    const sorted = lrs.sort((a, b) => Number(b.consignmentId) - Number(a.consignmentId));
+    console.log("🔄 Sorted LRs:", sorted.length);
+
+    const formatted = await Promise.all(
+      sorted.map(async (lr, index) => {
+        console.log(`📝 Processing LR ${index + 1}:`, lr.consignmentId);
+        
+        const consignor = await storage.getConsignor(lr.consignorId);
+        const consignee = await storage.getConsignee(lr.consigneeId);
+        const vehicle = lr.vehicleId ? await storage.getVehicle(lr.vehicleId) : null;
+
+        const result = {
+          id: lr.consignmentId,
+          cnoteNo: lr.cnoteNo,
+          date: lr.bookingDate,
+          consignor: consignor?.name || "Unknown",
+          consignee: consignee?.name || "Unknown",
+          vehicle: vehicle?.vehicleNo || "Not assigned",
+          status: lr.transportMode || "in-transit",
+        };
+        
+        console.log(`✅ Processed LR ${index + 1}:`, result);
+        return result;
+      })
+    );
+
+    console.log("🚀 API sending response:", formatted.length, "items");
+    res.json(formatted);
+  } catch (err) {
+    console.error("💥 API error in /api/recent/lrs:", err);
+    res.status(500).json({ 
+      error: "Failed to fetch recent LRs",
+      message: err instanceof Error ? err.message : String(err)
+    });
+  }
+});
 
   app.put("/api/lrs/:id", async (req, res) => {
     try {
@@ -395,7 +470,77 @@ app.post("/api/vehicles", async (req, res) => {
     }
   });
 
-  const httpServer = createServer(app);
+// Freight Master Routes
+  app.get("/api/freights", async (req, res) => {
+    try {
+      const freights = await storage.getAllFreights();
+      res.json(freights);
+    } catch (error) {
+      console.error("Error fetching freights:", error);
+      res.status(500).json({ message: "Failed to fetch freight rates" });
+    }
+  });
 
+  app.get("/api/freights/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const freight = await storage.getFreight(id);
+      if (!freight) {
+        return res.status(404).json({ message: "Freight rate not found" });
+      }
+      res.json(freight);
+    } catch (error) {
+      console.error("Error fetching freight:", error);
+      res.status(500).json({ message: "Failed to fetch freight rate" });
+    }
+  });
+
+  app.post("/api/freights", async (req, res) => {
+    try {
+      const validatedData = insertFreightSchema.parse(req.body);
+      const freight = await storage.createFreight(validatedData);
+      res.status(201).json(freight);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid freight data", errors: error.errors });
+      }
+      console.error("Error creating freight:", error);
+      res.status(500).json({ message: "Failed to create freight rate" });
+    }
+  });
+
+  app.put("/api/freights/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const validatedData = insertFreightSchema.partial().parse(req.body);
+      const freight = await storage.updateFreight(id, validatedData);
+      if (!freight) {
+        return res.status(404).json({ message: "Freight rate not found" });
+      }
+      res.json(freight);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid freight data", errors: error.errors });
+      }
+      console.error("Error updating freight:", error);
+      res.status(500).json({ message: "Failed to update freight rate" });
+    }
+  });
+
+  app.delete("/api/freights/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const success = await storage.deleteFreight(id);
+      if (!success) {
+        return res.status(404).json({ message: "Freight rate not found" });
+      }
+      res.status(204).send();
+    } catch (error) {
+      console.error("Error deleting freight:", error);
+      res.status(500).json({ message: "Failed to delete freight rate" });
+    }
+  });
+
+  const httpServer = createServer(app);
   return httpServer;
 }

@@ -1,6 +1,7 @@
 import { 
   type User, 
   type InsertUser,
+  type UserRole,
   type Vehicle,
   type InsertVehicle,
   type Driver,
@@ -15,6 +16,8 @@ import {
   type InsertInvoiceLineItem,
   type ConsignmentDetails,
   type InsertConsignmentDetails,
+  type Freight,
+  type InsertFreight,
   users,
   vehicleMaster,
   driverMaster,
@@ -22,7 +25,8 @@ import {
   consigneeMaster,
   consignmentNote,
   invoiceLineItems,
-  consignmentDetails
+  consignmentDetails,
+   freightMaster
 } from "@shared/schema";
 
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -38,7 +42,6 @@ const sql = postgres(process.env.DATABASE_URL || "", {
   // optional: any postgres-js options
 });
 
-
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL environment variable is not set");
 }
@@ -51,9 +54,6 @@ if (process.env.DATABASE_URL.includes("helium") || process.env.DATABASE_URL.incl
   );
 }
 
-// const queryClient = postgres(process.env.DATABASE_URL);
-// const db = drizzle(queryClient);
-
 export const db = drizzle(sql, { schema });
 
 // optional: export a DB type if you want strong typing elsewhere
@@ -62,8 +62,10 @@ export type Database = typeof db;
 export interface IStorage {
   // User methods
   getUser(id: string): Promise<User | undefined>;
-  getUserByUsername(username: string): Promise<User | undefined>;
+  getUserByEmail(email: string): Promise<User | undefined>;
+  getUserByGoogleId(googleId: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+  updateUser(id: string, user: Partial<InsertUser>): Promise<User | undefined>;
   
   // Vehicle methods
   getAllVehicles(): Promise<Vehicle[]>;
@@ -107,6 +109,14 @@ export interface IStorage {
     details?: Partial<Omit<InsertConsignmentDetails, "consignmentId">>;
   }): Promise<any | undefined>;
   deleteConsignmentNote(id: number): Promise<boolean>;
+
+  // Freight methods
+  getAllFreights(): Promise<Freight[]>;
+  getFreight(id: number): Promise<Freight | undefined>;
+  createFreight(freight: InsertFreight): Promise<Freight>;
+  updateFreight(id: number, freight: Partial<InsertFreight>): Promise<Freight | undefined>;
+  deleteFreight(id: number): Promise<boolean>;
+
 }
 
 export class DbStorage implements IStorage {
@@ -116,8 +126,13 @@ export class DbStorage implements IStorage {
     return result[0];
   }
 
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    const result = await db.select().from(users).where(eq(users.username, username)).limit(1);
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const result = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    return result[0];
+  }
+
+  async getUserByGoogleId(googleId: string): Promise<User | undefined> {
+    const result = await db.select().from(users).where(eq(users.googleId, googleId)).limit(1);
     return result[0];
   }
 
@@ -126,6 +141,12 @@ export class DbStorage implements IStorage {
     return result[0];
   }
 
+  async updateUser(id: string, data: Partial<InsertUser>): Promise<User | undefined> {
+    const result = await db.update(users).set({ ...data, updatedAt: new Date() }).where(eq(users.id, id)).returning();
+    return result[0];
+  }
+
+  // ... rest of your existing storage methods remain the same
   // Vehicle methods
   async getAllVehicles(): Promise<Vehicle[]> {
     return await db.select().from(vehicleMaster).orderBy(vehicleMaster.vehicleId);
@@ -136,19 +157,18 @@ export class DbStorage implements IStorage {
     return result[0];
   }
 
-  // In storage.ts - update the createVehicle method
-async createVehicle(vehicle: InsertVehicle): Promise<Vehicle> {
-  try {
-    const result = await db.insert(vehicleMaster).values(vehicle).returning();
-    if (result.length === 0) {
-      throw new Error("Failed to create vehicle - no data returned");
+  async createVehicle(vehicle: InsertVehicle): Promise<Vehicle> {
+    try {
+      const result = await db.insert(vehicleMaster).values(vehicle).returning();
+      if (result.length === 0) {
+        throw new Error("Failed to create vehicle - no data returned");
+      }
+      return result[0];
+    } catch (error) {
+      console.error("Database error in createVehicle:", error);
+      throw error;
     }
-    return result[0];
-  } catch (error) {
-    console.error("Database error in createVehicle:", error);
-    throw error;
   }
-}
 
   async updateVehicle(id: number, vehicle: Partial<InsertVehicle>): Promise<Vehicle | undefined> {
     const result = await db.update(vehicleMaster).set(vehicle).where(eq(vehicleMaster.vehicleId, id)).returning();
@@ -244,7 +264,7 @@ async createVehicle(vehicle: InsertVehicle): Promise<Vehicle> {
     return notes;
   }
 
-  async getConsignmentNote(id: number): Promise<any | undefined> {
+  async getConsignmentNote(id: any): Promise<any | undefined> {
     const noteResult = await db.select({
       note: consignmentNote,
       consignor: consignorMaster,
@@ -303,16 +323,6 @@ async createVehicle(vehicle: InsertVehicle): Promise<Vehicle> {
     };
   }
 
-async testConnection(): Promise<boolean> {
-  try {
-    await db.select().from(vehicleMaster).limit(1);
-    return true;
-  } catch (error) {
-    console.error("Database connection test failed:", error);
-    return false;
-  }
-}
-
   async updateConsignmentNote(id: number, data: {
     note?: Partial<InsertConsignmentNote>;
     invoices?: Omit<InsertInvoiceLineItem, "consignmentId">[];
@@ -342,6 +352,31 @@ async testConnection(): Promise<boolean> {
     await db.delete(invoiceLineItems).where(eq(invoiceLineItems.consignmentId, id));
     await db.delete(consignmentDetails).where(eq(consignmentDetails.consignmentId, id));
     const result = await db.delete(consignmentNote).where(eq(consignmentNote.consignmentId, id)).returning();
+    return result.length > 0;
+  }
+
+  // Freight methods
+  async getAllFreights(): Promise<Freight[]> {
+    return await db.select().from(freightMaster).orderBy(freightMaster.freightId);
+  }
+
+  async getFreight(id: number): Promise<Freight | undefined> {
+    const result = await db.select().from(freightMaster).where(eq(freightMaster.freightId, id)).limit(1);
+    return result[0];
+  }
+
+  async createFreight(freight: InsertFreight): Promise<Freight> {
+    const result = await db.insert(freightMaster).values(freight).returning();
+    return result[0];
+  }
+
+  async updateFreight(id: number, freight: Partial<InsertFreight>): Promise<Freight | undefined> {
+    const result = await db.update(freightMaster).set(freight).where(eq(freightMaster.freightId, id)).returning();
+    return result[0];
+  }
+
+  async deleteFreight(id: number): Promise<boolean> {
+    const result = await db.delete(freightMaster).where(eq(freightMaster.freightId, id)).returning();
     return result.length > 0;
   }
 }
